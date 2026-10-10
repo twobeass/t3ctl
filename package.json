@@ -1,0 +1,21 @@
+{
+  "name": "t3-controller",
+  "version": "0.2.0-dev.0",
+  "description": "External/headless control CLI for T3 Code",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "t3ctl": "./t3ctl"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "test:integration": "node --test test/integration.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.63.0"
+  }
+}
