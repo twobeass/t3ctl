@@ -1,6 +1,6 @@
 {
   "name": "t3-controller",
-  "version": "0.2.0-dev.0",
+  "version": "0.2.0-dev.1",
   "description": "External/headless control CLI for T3 Code",
   "license": "MIT",
   "private": true,

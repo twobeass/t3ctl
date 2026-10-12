@@ -93,3 +93,16 @@ test('frame decoder and RPC allowlist', () => {
   v2.socket.receive({ _tag: 'Exit', requestId: '1', exit: { _tag: 'Success', value: { threadId: 't' } } });
   return launch.finally(() => v2.close());
 });
+
+test('CLI exposes watch and launch/send watch convenience with bounded monitoring options', () => {
+  assert.equal(parse(['watch', 'thread', '--run-id', 'run', '--watch-timeout', '3600']).command, 'watch');
+  const launch = ['launch', '--project', 'Project', '--provider', 'codex', '--model', 'model', '--title', 'Task', '--prompt', 'Do it'];
+  assert.equal(parse([...launch, '--watch', '--watch-timeout', '7200', '--poll-interval', '2']).options.watch, true);
+  assert.equal(parse(['send', 'thread', '--prompt', 'continue', '--watch']).options.watch, true);
+  for (const args of [
+    ['watch'],
+    ['watch', 'thread', '--watch-timeout', '86401'],
+    [...launch, '--watch-timeout', '10'],
+    ['send', 'thread', '--prompt', 'continue', '--poll-interval', '2'],
+  ]) assert.throws(() => parse(args), { code: 'USAGE' });
+});

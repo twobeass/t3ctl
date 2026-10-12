@@ -29,6 +29,12 @@ Protocol 2 uses `orchestration.launchThread` for new top-level threads and V2 du
 
 Each supported T3 build is contract-audited and version-gated. Newer semver alone is not treated as compatible.
 
+## Completion monitoring
+
+External callers can keep `t3ctl watch` pending on a specific durable T3 run. The watcher is read-only: it repeatedly reads T3's authoritative thread projection until the target run completes, is interrupted, fails, requests human attention, or reaches the caller's timeout. `launch --watch` and `send --watch` are convenience wrappers over the same watcher and preserve the mutation's correlated message/run identifiers.
+
+This is intentionally different from internal T3 orchestration. It does not create a monitor thread, daemon, webhook, or shadow state. Ending the watcher never cancels T3 work.
+
 ## Ambiguous mutations
 
 Every external mutation receives caller-generated identifiers and a local receipt before dispatch. A transport failure after send is treated as ambiguous: the controller reads T3 state and correlates the known thread/message instead of replaying the mutation.

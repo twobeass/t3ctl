@@ -20,6 +20,12 @@ async function cli(binary, args) {
   try { return (await exec(binary, args, { timeout: 20000, maxBuffer: 1024 * 1024 })).stdout; }
   catch { throw new ControllerError('AUTH', 'Offizielle T3-Auth-CLI fehlgeschlagen; Prozessausgabe zum Schutz von Secrets verworfen.'); }
 }
+function sessionTtl(options) {
+  if (!options.watchSession) return '10m';
+  const watchSeconds = Number(options['watch-timeout'] ?? 3600);
+  const minutes = Math.max(10, Math.ceil((watchSeconds + 120) / 60));
+  return `${minutes}m`;
+}
 export async function authenticate(discovery, options = {}, env = process.env, runCli = cli) {
   let token = env.T3CTL_TOKEN;
   const file = options['token-file'] ?? env.T3CTL_TOKEN_FILE;
@@ -49,7 +55,7 @@ export async function authenticate(discovery, options = {}, env = process.env, r
     });
   }
   let issued;
-  try { issued = JSON.parse(await runCli(binary, ['auth', 'session', 'issue', '--base-dir', discovery.baseDir, '--ttl', '10m', '--label', `t3ctl-${randomUUID()}`, '--json'])); }
+  try { issued = JSON.parse(await runCli(binary, ['auth', 'session', 'issue', '--base-dir', discovery.baseDir, '--ttl', sessionTtl(options), '--label', `t3ctl-${randomUUID()}`, '--json'])); }
   catch (error) { if (error instanceof ControllerError) throw error; throw new ControllerError('AUTH', 'Unerwartete T3-Auth-CLI-Antwort.'); }
   if (typeof issued.token !== 'string' || typeof issued.sessionId !== 'string') throw new ControllerError('AUTH', 'T3-Auth-CLI lieferte keinen Bearer.');
   let cleaned = false;

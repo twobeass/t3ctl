@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { wait, summarizeThread, recover, stop, stopSatisfied } from '../src/sessions.mjs';
+import { wait, watch, watchMutation, summarizeThread, recover, stop, stopSatisfied } from '../src/sessions.mjs';
 import { parse } from '../src/cli.mjs';
 import { createHash } from 'node:crypto';
 const t = { id: 'thread', projectId: 'project', messages: [], activities: [], session: { status: 'ready' }, latestTurn: { turnId: 'run', state: 'completed', requestedAt: '2026-10-03T08:00:00Z' } };
@@ -50,4 +50,82 @@ test('pending requests ignore refresh, empty inputs and stale failed replies; cl
 });
 test('wait with malformed timestamps fails closed rather than returning previous completion', async () => {
   await assert.rejects(wait(client({ ...t, messages: [{ role: 'user' }] }), 'thread', { 'wait-timeout': 0.01, 'poll-interval': 0.001 }), { code: 'TIMEOUT' });
+});
+
+test('watch returns completed result text for the selected V1 run', async () => {
+  const thread = {
+    ...t,
+    messages: [
+      { id: 'u', role: 'user', text: 'review', turnId: null, createdAt: '2026-10-03T08:00:00Z' },
+      { id: 'a', role: 'assistant', text: 'review complete', turnId: 'run', createdAt: '2026-10-03T08:00:10Z' },
+    ],
+  };
+  const result = await watch(client(thread), 'thread', { 'run-id': 'run', 'watch-timeout': 0.1, 'poll-interval': 0.001 });
+  assert.equal(result.watchState, 'completed');
+  assert.equal(result.status, 'completed');
+  assert.equal(result.result, 'review complete');
+  assert.equal(result.resultMessageId, 'a');
+});
+
+test('watch reports attention instead of hanging on pending approval', async () => {
+  const running = {
+    ...t,
+    latestTurn: { ...t.latestTurn, state: 'running' },
+    session: { status: 'running', activeTurnId: 'run' },
+    activities: [{ kind: 'approval.requested', payload: { requestId: 'approval' } }],
+  };
+  await assert.rejects(
+    watch(client(running), 'thread', { 'run-id': 'run', 'watch-timeout': 0.1, 'poll-interval': 0.001 }),
+    error => error.code === 'ATTENTION' && error.details.watchState === 'attention' && error.details.pendingInput[0].requestId === 'approval',
+  );
+});
+
+test('launch/send watch correlation ignores the previously completed V1 run until the new run appears', async () => {
+  const queued = {
+    ...t,
+    messages: [{ id: 'new-message', role: 'user', text: 'new review', turnId: null, createdAt: '2026-10-03T08:01:00Z' }],
+  };
+  const completed = {
+    ...t,
+    latestTurn: { turnId: 'new-run', state: 'completed', requestedAt: '2026-10-03T08:01:01Z' },
+    messages: [
+      { id: 'new-message', role: 'user', text: 'new review', turnId: null, createdAt: '2026-10-03T08:01:00Z' },
+      { id: 'new-result', role: 'assistant', text: 'new result', turnId: 'new-run', createdAt: '2026-10-03T08:01:10Z' },
+    ],
+  };
+  let reads = 0;
+  const sequenceClient = {
+    get: async () => ({ thread: reads++ === 0 ? queued : completed }),
+    rpc: () => assert.fail('watch must not mutate'),
+  };
+  const result = await watchMutation(sequenceClient, {
+    threadId: 'thread',
+    runId: null,
+    messageId: 'new-message',
+    previousRunId: 'run',
+    requestCreatedAt: '2026-10-03T08:01:00Z',
+  }, { watch: true, 'watch-timeout': 0.2, 'poll-interval': 0.001 });
+  assert.equal(result.runId, 'new-run');
+  assert.equal(result.watchState, 'completed');
+  assert.equal(result.result, 'new result');
+  assert.ok(reads >= 2);
+});
+
+test('watch timeout is explicit and leaves the T3 run untouched', async () => {
+  const running = { ...t, latestTurn: { ...t.latestTurn, state: 'running' }, session: { status: 'running', activeTurnId: 'run' } };
+  await assert.rejects(
+    watch(client(running), 'thread', { 'run-id': 'run', 'watch-timeout': 0.01, 'poll-interval': 0.001 }),
+    error => error.code === 'TIMEOUT' && error.details.watchState === 'timeout' && error.details.runId === 'run',
+  );
+});
+
+test('standalone watch does not return a stale completed run while a newer user message is queued', async () => {
+  const thread = {
+    ...t,
+    messages: [{ id: 'queued', role: 'user', text: 'queued work', createdAt: '2026-10-03T08:01:00Z' }],
+  };
+  await assert.rejects(
+    watch(client(thread), 'thread', { 'watch-timeout': 0.01, 'poll-interval': 0.001 }),
+    error => error.code === 'TIMEOUT' && error.details.watchState === 'timeout',
+  );
 });

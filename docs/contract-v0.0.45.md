@@ -114,6 +114,11 @@ lokal unter `.reference/t3code-0.0.45/` (ignoriert). Laufender Server meldet üb
 - Controller schreibt vor Dispatch einen lokalen Request-Beleg mit IDs und
   Prompt-Hash. Unklare Antworten werden durch Thread-/Message-ID-Lesen
   rekonstruiert; kein automatischer neuer Thread oder Bootstrap-Retry.
+- `t3ctl watch` ist in V1 eine rein lesende Langzeitbeobachtung über den belegten
+  HTTP-Thread-Snapshot. Ein expliziter `runId` wird nur akzeptiert, solange er der
+  aktuelle V1-Turn ist; bei einem inzwischen anderen Turn wird nicht geraten.
+  Completion, Interrupt, Fehler und Pending-Input werden aus dem durablen T3-Zustand
+  abgeleitet. Watch-Timeout oder Prozessende verändern den T3-Lauf nicht.
 
 ## UPSTREAM-ONLY / NEWER
 

@@ -70,3 +70,23 @@ test('journal concurrent claims have one owner; immutable 0600 receipt survives'
   assert.deepEqual(await readReceipt('same-request', directory), receipt);
   for (const key of ['../escape', 'a/b', '', 'a'.repeat(101)]) assert.throws(() => requestKey(key), { code: 'USAGE' });
 }));
+
+test('local watch auto-auth covers the requested watch window and is still revoked', async () => {
+  const calls = [];
+  const fakeCli = async (binary, args) => {
+    calls.push(args);
+    if (args[0] === '--version') return 't3 v0.0.45\n';
+    if (args[2] === 'issue') return JSON.stringify({ token: 'watch-bearer', sessionId: 'watch-session' });
+    return 'Revoked';
+  };
+  const auth = await authenticate(
+    { autoAuth: true, baseDir: '/fixture' },
+    { watchSession: true, 'watch-timeout': '7200' },
+    {},
+    fakeCli,
+  );
+  const issue = calls.find(args => args[2] === 'issue');
+  assert.equal(issue[issue.indexOf('--ttl') + 1], '122m');
+  await auth.cleanup();
+  assert.deepEqual(calls.at(-1), ['auth', 'session', 'revoke', 'watch-session', '--base-dir', '/fixture']);
+});

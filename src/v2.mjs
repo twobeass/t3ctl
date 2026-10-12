@@ -16,7 +16,7 @@ function sessionStatus(run) {
   return 'ready';
 }
 
-function turnState(run) {
+export function v2RunState(run) {
   if (!run) return null;
   if (run.status === 'failed') return 'error';
   if (['interrupted', 'cancelled'].includes(run.status)) return 'interrupted';
@@ -52,7 +52,7 @@ export function normalizeV2Snapshot(snapshot) {
     latestTurn: latestRun
       ? {
           turnId: latestRun.id,
-          state: turnState(latestRun),
+          state: v2RunState(latestRun),
           requestedAt: latestRun.requestedAt,
           startedAt: latestRun.startedAt,
           completedAt: latestRun.completedAt,

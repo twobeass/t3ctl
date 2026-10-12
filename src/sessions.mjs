@@ -6,7 +6,7 @@ import { resolveProject, resolveProvider, resolveModel, resolveOptions } from '.
 import { requestKey, readReceipt, claimReceipt } from './journal.mjs';
 import { ControllerError } from './errors.mjs';
 import { validateExistingWorktree } from './worktree.mjs';
-import { buildV2LaunchPayload, buildV2SendCommand, buildV2StopCommand, normalizeV2Snapshot } from './v2.mjs';
+import { buildV2LaunchPayload, buildV2SendCommand, buildV2StopCommand, normalizeV2Snapshot, v2RunState } from './v2.mjs';
 const hash = value => createHash('sha256').update(value).digest('hex');
 const MINIMUM_RUNTIME_MODE = 'auto';
 const BELOW_MINIMUM_RUNTIME_MODES = new Set(['approval-required', 'auto-accept-edits']);
@@ -60,6 +60,22 @@ function assertReceipt(client, receipt) {
     throw new ControllerError('UNCERTAIN', 'Request-Beleg gehört nicht zu dieser T3-Instanz oder Protokollgeneration.', { requestId: receipt.requestId });
   }
 }
+function correlatedRunId(thread, { messageId, priorRunId = null, createdAt = null } = {}) {
+  const message = messageId ? thread.messages.find(m => m.id === messageId && m.role === 'user') : null;
+  if (!message) return null;
+  if (message.turnId) return message.turnId;
+  const index = thread.messages.indexOf(message);
+  const following = thread.messages.slice(index + 1);
+  const nextUser = following.findIndex(m => m.role === 'user');
+  const segment = nextUser < 0 ? following : following.slice(0, nextUser);
+  const responseTurn = segment.find(m => m.role === 'assistant' && m.turnId)?.turnId;
+  if (responseTurn) return responseTurn;
+  const latest = thread.latestTurn;
+  const requestedAt = Date.parse(latest?.requestedAt);
+  const created = Date.parse(createdAt);
+  const timeMatches = createdAt === null || (Number.isFinite(created) && Number.isFinite(requestedAt) && requestedAt >= created);
+  return nextUser < 0 && latest?.turnId && latest.turnId !== priorRunId && timeMatches ? latest.turnId : null;
+}
 export async function recover(client, receipt) {
   assertReceipt(client, receipt);
   let thread;
@@ -72,18 +88,10 @@ export async function recover(client, receipt) {
   if (!message || hash(message.text) !== receipt.promptHash || thread.projectId !== receipt.projectId) {
     throw new ControllerError('UNCERTAIN', 'Thread vorhanden, Request noch nicht eindeutig zugeordnet; nicht erneut senden.', { requestId: receipt.requestId, threadId: receipt.threadId, recoveryState: !message ? 'message-pending' : 'message-mismatch' });
   }
-  // v0.0.45 leaves user message turnId null and stamps requestedAt from the
-  // provider session update, not the client command timestamp. Correlate the
-  // response segment between this message and the next user message instead.
-  const index = thread.messages.indexOf(message);
-  const following = thread.messages.slice(index + 1);
-  const nextUser = following.findIndex(m => m.role === 'user');
-  const segment = nextUser < 0 ? following : following.slice(0, nextUser);
-  const responseTurn = segment.find(m => m.role === 'assistant' && m.turnId)?.turnId;
-  const latest = thread.latestTurn;
-  const latestMatches = nextUser < 0 && latest?.turnId !== receipt.priorTurnId && Date.parse(latest?.requestedAt) >= Date.parse(receipt.createdAt);
-  const runId = message.turnId ?? responseTurn ?? (latestMatches ? latest.turnId : null);
-  return { requestId: receipt.requestId, threadId: thread.id, commandId: receipt.commandId, messageId: receipt.messageId, runId, turnId: runId, projectId: thread.projectId, modelSelection: thread.modelSelection, workspace: { branch: thread.branch, worktreePath: thread.worktreePath }, status: thread.session?.status ?? 'pending', turnState: thread.latestTurn?.turnId === runId ? thread.latestTurn.state : null, recovered: true };
+  // v0.0.45 leaves the user message turnId null. Correlate through the
+  // response segment and the prior run instead of guessing from the latest row.
+  const runId = correlatedRunId(thread, { messageId: receipt.messageId, priorRunId: receipt.priorTurnId ?? null, createdAt: receipt.createdAt });
+  return { requestId: receipt.requestId, threadId: thread.id, commandId: receipt.commandId, messageId: receipt.messageId, previousRunId: receipt.priorTurnId ?? null, requestCreatedAt: receipt.createdAt, runId, turnId: runId, projectId: thread.projectId, modelSelection: thread.modelSelection, workspace: { branch: thread.branch, worktreePath: thread.worktreePath }, status: thread.session?.status ?? 'pending', turnState: thread.latestTurn?.turnId === runId ? thread.latestTurn.state : null, recovered: true };
 }
 export async function launch(client, options) {
   const requestId = requestKey(options['request-id'] ?? randomUUID());
@@ -228,6 +236,98 @@ export async function wait(client, id, options) {
     if (Date.now() >= deadline) throw new ControllerError('TIMEOUT', 'Wait-Zeit abgelaufen; T3 läuft unabhängig weiter.', { threadId: id, runId: result.runId, status: result.status });
     await sleep(Math.min(Number(options['poll-interval'] ?? 1) * 1000, Math.max(1, deadline - Date.now())));
   } while (true);
+}
+function pendingInputForRun(thread, summary, runId) {
+  if (!thread._v2 || !runId) return summary.pendingInput;
+  const runByNode = new Map((thread._v2.nodes ?? []).map(node => [node.id, node.runId]));
+  const scoped = (thread._v2.runtimeRequests ?? [])
+    .filter(request => request.status === 'pending' && request.kind !== 'auth_refresh' && runByNode.get(request.nodeId) === runId)
+    .map(request => ({ kind: request.kind, requestId: request.id }));
+  return scoped.length || thread.latestTurn?.turnId !== runId ? scoped : summary.pendingInput;
+}
+function assistantResultForRun(thread, runId) {
+  return [...(thread.messages ?? [])].reverse().find(message => message.role === 'assistant' && (!runId || message.turnId === runId) && typeof message.text === 'string' && message.text.trim()) ?? null;
+}
+function watchSuccess(summary, thread, runId, watchState, startedAt) {
+  const resultMessage = assistantResultForRun(thread, runId);
+  return {
+    threadId: summary.threadId,
+    projectId: summary.projectId,
+    title: summary.title,
+    modelSelection: summary.modelSelection,
+    runtimeMode: summary.runtimeMode,
+    workspace: summary.workspace,
+    status: ['completed', 'interrupted', 'stopped'].includes(watchState) ? watchState : summary.status,
+    threadStatus: summary.status,
+    runId,
+    watchState,
+    result: resultMessage?.text ?? null,
+    resultMessageId: resultMessage?.id ?? null,
+    pendingInput: [],
+    lastError: summary.lastError,
+    elapsedMs: Date.now() - startedAt,
+  };
+}
+export async function watch(client, id, options = {}) {
+  threadId(id);
+  const startedAt = Date.now();
+  const deadline = startedAt + Number(options['watch-timeout'] ?? 3600) * 1000;
+  const pollMs = Number(options['poll-interval'] ?? 1) * 1000;
+  let targetRunId = options['run-id'] ?? null;
+  const messageId = options._messageId ?? null;
+  const previousRunId = options._previousRunId ?? null;
+  const requestCreatedAt = options._requestCreatedAt ?? null;
+  do {
+    const thread = await readThread(client, id);
+    const summary = summarizeThread(thread);
+    let awaitingUnassignedRun = false;
+    if (!targetRunId && messageId) targetRunId = correlatedRunId(thread, { messageId, priorRunId: previousRunId, createdAt: requestCreatedAt });
+    if (!targetRunId && !messageId) {
+      const lastUser = thread.messages.findLast(message => message.role === 'user');
+      const userTimestamp = Date.parse(lastUser?.createdAt);
+      const runTimestamp = Date.parse(thread.latestTurn?.requestedAt);
+      awaitingUnassignedRun = Boolean(lastUser && (!thread.latestTurn || !Number.isFinite(userTimestamp) || !Number.isFinite(runTimestamp) || userTimestamp > runTimestamp));
+      if (!awaitingUnassignedRun) targetRunId = thread.latestTurn?.turnId ?? null;
+    }
+
+    let state = null;
+    if (targetRunId && thread._v2) {
+      const targetRun = thread._v2.runs.find(run => run.id === targetRunId);
+      if (!targetRun) throw new ControllerError('RESOLUTION', 'Ziel-Run ist im T3-V2-Thread nicht vorhanden.', { threadId: id, runId: targetRunId });
+      state = v2RunState(targetRun);
+    } else if (targetRunId && thread.latestTurn?.turnId === targetRunId) {
+      state = thread.latestTurn.state;
+    } else if (targetRunId && thread.latestTurn?.turnId && thread.latestTurn.turnId !== targetRunId) {
+      throw new ControllerError('ATTENTION', 'Ziel-Run ist in T3 nicht mehr der aktuelle Run; Ergebnis wird nicht geraten.', { watchState: 'attention', threadId: id, runId: targetRunId, actualRunId: thread.latestTurn.turnId, elapsedMs: Date.now() - startedAt });
+    }
+
+    const pendingInput = pendingInputForRun(thread, summary, targetRunId);
+    if (pendingInput.length && (!state || ['starting', 'running'].includes(state))) {
+      throw new ControllerError('ATTENTION', 'T3 benötigt eine Freigabe oder Eingabe.', { watchState: 'attention', threadId: id, runId: targetRunId, pendingInput, elapsedMs: Date.now() - startedAt });
+    }
+    if (state === 'error' || (!targetRunId && !awaitingUnassignedRun && summary.status === 'error')) {
+      throw new ControllerError('RUN', 'Beobachteter T3-Run ist fehlgeschlagen.', { watchState: 'failed', threadId: id, runId: targetRunId, status: summary.status, elapsedMs: Date.now() - startedAt });
+    }
+    if (state === 'completed') return watchSuccess(summary, thread, targetRunId, 'completed', startedAt);
+    if (state === 'interrupted') return watchSuccess(summary, thread, targetRunId, 'interrupted', startedAt);
+    if (!targetRunId && !messageId && !awaitingUnassignedRun && !['starting', 'running'].includes(summary.status)) return watchSuccess(summary, thread, null, 'idle', startedAt);
+    if (Date.now() >= deadline) {
+      throw new ControllerError('TIMEOUT', 'Watch-Zeit abgelaufen; T3 läuft unabhängig weiter.', { watchState: 'timeout', threadId: id, runId: targetRunId, status: summary.status, elapsedMs: Date.now() - startedAt });
+    }
+    await sleep(Math.min(pollMs, Math.max(1, deadline - Date.now())));
+  } while (true);
+}
+export async function watchMutation(client, result, options) {
+  if (!options.watch) return result;
+  const watched = await watch(client, result.threadId, {
+    'run-id': result.runId ?? undefined,
+    'watch-timeout': options['watch-timeout'],
+    'poll-interval': options['poll-interval'],
+    _messageId: result.messageId ?? null,
+    _previousRunId: result.previousRunId ?? null,
+    _requestCreatedAt: result.requestCreatedAt ?? null,
+  });
+  return { ...result, ...watched };
 }
 export async function stop(client, id, options) {
   threadId(id);

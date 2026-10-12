@@ -41,6 +41,25 @@ Version checks are deliberately strict. A different T3 build is rejected until i
 
 `status`, `projects`, and `models` are read-only. Mutating commands use T3's own control surface; the controller never writes T3's database and never launches provider CLIs outside T3.
 
+## Watching externally launched work
+
+An external coordinator can keep one `t3ctl` process open until a specific T3 run reaches a meaningful state:
+
+```sh
+./t3ctl watch THREAD_ID --run-id RUN_ID --watch-timeout 7200 --json
+```
+
+Or combine launch/follow-up and monitoring:
+
+```sh
+./t3ctl launch ... --watch --watch-timeout 7200 --json
+./t3ctl send THREAD_ID --prompt-file /tmp/review-round-2.md --watch --json
+```
+
+A successful completion returns `watchState:"completed"`, the exact `runId`, and the final assistant `result`. Interruptions return `watchState:"interrupted"`. Approval or user-input blocks fail fast with exit code 12 / `ATTENTION`; provider failures use exit code 10 / `RUN`; an expired watch uses exit code 9 / `TIMEOUT` and **does not cancel the T3 run**.
+
+The watcher is deliberately read-only after launch/send. It follows durable T3 thread state and keeps the caller's process pending, so an external coordinator can resume immediately when the review completes. V1 and the current V2 adapter use bounded HTTP polling; no daemon, shadow session, or webhook infrastructure is introduced.
+
 ## Why this still exists in T3 V2
 
 T3 V2 includes a native app-owned MCP server. That is the right tool **inside** a T3 agent session. Its credentials are scoped to the environment, parent thread, provider instance, and provider session.
@@ -69,7 +88,7 @@ The worktree restriction is Git isolation, not an OS/container sandbox.
 
 ## Authentication
 
-Local auto-auth uses the official matching T3 runtime's `auth session issue` / `auth session revoke` CLI. The temporary bearer stays in memory and is revoked after the command. This avoids crossing V1/V2 credential stores.
+Local auto-auth uses the official matching T3 runtime's `auth session issue` / `auth session revoke` CLI. The temporary bearer stays in memory and is revoked after the command. Normal commands use a 10-minute session; a watch command requests only enough TTL to cover its configured watch window plus a two-minute margin. This avoids both premature expiry during long reviews and crossing V1/V2 credential stores.
 
 Remote use requires an explicit bearer through `T3CTL_TOKEN` or a private regular `--token-file` with mode 0600.
 

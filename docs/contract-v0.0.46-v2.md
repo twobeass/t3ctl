@@ -62,6 +62,13 @@ The V2 Stop behavior for active work is represented by `run.interrupt` with
 `holdQueue:true`. `t3ctl stop` maps to that active-run operation in V2. It does not
 attempt to reproduce all provider-session lifecycle controls.
 
+`t3ctl watch` remains read-only and uses the durable V2 thread projection. Unlike V1,
+V2 retains the run list, so a watcher can resolve an explicit historical target run even
+when a newer run is active. Pending runtime requests are scoped through their execution
+node when possible. The current adapter intentionally uses bounded HTTP polling rather
+than adding Effect-RPC stream handling solely for the watcher; timeout or client exit
+never interrupts T3 work.
+
 ## Native MCP boundary
 
 The V2 `t3-code` MCP endpoint is app-owned and injects short-lived credentials scoped
